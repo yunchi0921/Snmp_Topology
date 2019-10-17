@@ -127,28 +127,16 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 	if switch_name == "Cisco" {
 		port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
 	} else {
-		/*查閱 Juniper ifindex*/
-		oids := []string{"1.3.6.1.2.1.2.2.1.2." + oid[13]}
-		result, err := gosnmp.Default.Get(oids)
-		if err != nil {
-			log.Fatalf("Get() err: %v", err)
-		}
-		for _, v := range result.Variables {
-			s := strings.Split(string(v.Value.([]byte)), "/") //取得port號
-			s = strings.Split(s[len(s)-1], ".")               //去掉 .0 (e.g. 14.0 -> 14)
-			i, err := strconv.Atoi(s[0])
-			if err != nil {
-				fmt.Printf("String to int error:%v\n", err)
-				os.Exit(1)
-			}
-			/*要是處理lldpRemSysName(OID 第11碼為8)，將domain_name去掉*/
-			if oid[10] == "8" {
-				port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
-			} else {
-				s = strings.Split(string(pdu.Value.([]byte)), ".")
-				port_table[i] = port_table[i] + " " + s[0]
-			}
-
+		/*Juniper
+		查閱 Juniper ifindex
+		*/
+		i = ifDescr(oid[13]) //第14碼為 Juniper ifindex
+		/*要是處理lldpRemSysName(OID 第11碼為8)，將domain_name去掉*/
+		if oid[10] == "8" {
+			port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
+		} else {
+			s := strings.Split(string(pdu.Value.([]byte)), ".")
+			port_table[i] = port_table[i] + " " + s[0]
 		}
 	}
 	return nil
