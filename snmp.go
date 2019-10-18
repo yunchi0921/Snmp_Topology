@@ -69,7 +69,11 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-
+			err = gosnmp.Default.Walk(oids[1], vlan_set_table)
+			if err != nil {
+				fmt.Printf("vlan_set_table Walk Error:%v\b", err)
+				os.Exit(1)
+			}
 		}
 
 		printTable()
@@ -108,10 +112,53 @@ func ifDescr(ifindex string) int {
 	}
 	return -1
 }
+
+/*
+dot1dBasePortIfIndex 1.3.6.1.2.1.17.1.4.1.2
+Juniper 用 IEEE 802.1D -> IfIndex
+*/
+func dot1dBasePortIfIndex(dot1d string) string {
+	oid := []string{"1.3.6.1.2.1.17.1.4.1.2." + dot1d}
+	result, err := gosnmp.Default.Get(oid)
+	var ifindex string
+	if err != nil {
+		log.Fatalf("Get() idot1dBasePortIfIndex err:%v", err)
+	}
+	for _, v := range result.Variables {
+		ifindex = gosnmp.ToBigInt(v.Value).String()
+	}
+	return ifindex
+}
+
+/*
+jnxExVlanName 1.3.6.1.4.1.2636.3.40.1.5.1.5.1.2
+Juniper 用 將 vlan index -> vlan_name
+*/
+func jnxExVlanName(index string) string {
+	oid := []string{"1.3.6.1.4.1.2636.3.40.1.5.1.5.1.2." + index}
+	result, err := gosnmp.Default.Get(oid)
+	var vlan_name string
+	if err != nil {
+		log.Fatalf("Get() jnxExVlanName err:%v", err)
+	}
+	for _, v := range result.Variables {
+		vlan_name = string(v.Value.([]byte))
+	}
+	return vlan_name
+}
+
+/*Port 屬於哪一個 vlan，實作因 OID 不同，又分為 Juniper 與 Cisco*/
 func vlan_set_table(pdu gosnmp.SnmpPDU) error {
 	oid := strings.Split(pdu.Name, ".") //分割OID
 	port_no := ifDescr(oid[len(oid)-1])
-	port_table[port_no] = port_table[port_no] + " vlan" + gosnmp.ToBigInt(pdu.Value).String()
+	if switch_name == "Cisco" {
+		port_table[port_no] = port_table[port_no] + " vlan" + gosnmp.ToBigInt(pdu.Value).String()
+	} else {
+		ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
+		port_no = ifDescr(ifindex)
+		vlan_name := jnxExVlanName(gosnmp.ToBigInt(pdu.Value).String())
+		port_table[port_no] = port_table[port_no] + " " + vlan_name
+	}
 	return nil
 }
 func set_port_table(pdu gosnmp.SnmpPDU) error {
@@ -141,6 +188,8 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 	}
 	return nil
 }
+
+/*印出交換器內容描述*/
 func printValue(pdu gosnmp.SnmpPDU) error {
 	switch pdu.Type {
 	case gosnmp.OctetString:
@@ -153,6 +202,8 @@ func printValue(pdu gosnmp.SnmpPDU) error {
 	}
 	return nil
 }
+
+/*初始化 port_table，此為全域變數，在每次 Ip 更新時刷新一次*/
 func intialize_map() {
 	port_no = 0
 	oids := []string{"1.0.8802.1.1.2.1.3.7.1.3"}
@@ -165,6 +216,8 @@ func intialize_map() {
 		port_table[i] = ""
 	}
 }
+
+/* 計算 switch port 數目，注意 Cisco 與 Juniper port 開頭分別為 1 與 0*/
 func portCount(pdu gosnmp.SnmpPDU) error {
 	port_no++
 	return nil
@@ -177,7 +230,8 @@ func printTable() {
 		}
 	} else {
 		for i = 0; i < port_no/2; i++ {
-			fmt.Printf("%2d:%30s\t%2d:%30s\n", i, port_table[i], i+port_no/2, port_table[i+port_no/2])
+			fmt.Printf("%2d:%35s\t%2d:%35s\n", i, port_table[i], i+port_no/2, port_table[i+port_no/2])
+
 		}
 
 	}
