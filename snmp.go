@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -58,6 +59,35 @@ func main() {
 				}
 			}
 		}
+		/*vlan access or trunk
+		Cisco:1.3.6.1.4.1.9.9.46.1.6.1.1.14 		TrunkPortDynamicStatus
+		Juniper:1.3.6.1.4.1.2636.3.40.1.5.1.7.1.5.3 jnxExVlanPortAccessMode*/
+
+		/*Cisco trunk 通過的 vlan，因為 Cisco 設定為 trunk mode 之後，就不會再任一個 vlan 當中出現，與 Juniper trunk 同時出現在很多個 vlan 不同
+		故要額外實作一個找出其通過vlan的方法*/
+
+		oids = []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.14", "1.3.6.1.4.1.2636.3.40.1.5.1.7.1.5.3"}
+		if switch_name == "Cisco" {
+			err = gosnmp.Default.Walk(oids[0], access_mode)
+			if err != nil {
+				fmt.Printf("access_mode Walk Error:%v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			err = gosnmp.Default.Walk(oids[1], access_mode)
+			if err != nil {
+				fmt.Printf("access_mode Walk Error:%v\n", err)
+				os.Exit(1)
+			}
+
+		}
+
+		/*Native Vlan ID
+		Cisco:	1.3.6.1.4.1.9.9.46.1.6.1.1.5 vlanTrunkPortNativeVlan
+		Juniper:1.3.6.1.2.1.17.7.1.4.5.1.1	dot1qPvid
+		*/
+		//code
+
 		/*port vlan 查詢，因為 Cisco & Juniper OID 不同，對於 Port 使用的 index 方法也不同，
 		必須分開時做，用前面儲存的 switch_name 進行判別式，區分出兩種機器實作
 		1.3.6.1.4.1.9.9.68.1.2.2.1.2		CISCO-VLAN-MEMBERSHIP-MIB
@@ -72,7 +102,7 @@ func main() {
 		} else {
 			err = gosnmp.Default.Walk(oids[1], vlan_set_table)
 			if err != nil {
-				fmt.Printf("vlan_set_table Walk Error:%v\b", err)
+				fmt.Printf("vlan_set_table Walk Error:%v\n", err)
 				os.Exit(1)
 			}
 		}
@@ -80,6 +110,69 @@ func main() {
 		printTable()
 
 	}
+}
+func access_mode(pdu gosnmp.SnmpPDU) error {
+	oid := strings.Split(pdu.Name, ".")
+	switch switch_name {
+	case "Juniper":
+		ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
+		port_nu := ifDescr(ifindex)
+		mode := gosnmp.ToBigInt(pdu.Value).String()
+		if mode == "1" {
+			port_table[port_nu] = port_table[port_nu] + "\taccess"
+		} else {
+			port_table[port_nu] = port_table[port_nu] + "\ttrunk"
+		}
+	case "Cisco":
+		port_nu := ifDescr(oid[len(oid)-1])
+		mode := gosnmp.ToBigInt(pdu.Value).String()
+		if mode == "2" {
+			port_table[port_nu] = port_table[port_nu] + "\taccess"
+			return nil
+		}
+		port_table[port_nu] = port_table[port_nu] + "\ttrunk"
+		//查詢 trunk 相關 vlan
+		oids := []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.4." + oid[len(oid)-1]}
+		result, err := gosnmp.Default.Get(oids)
+		if err != nil {
+			fmt.Printf("Get TrunkPortDynamicStatus Error:%v\n", err)
+			os.Exit(1)
+		}
+		for _, v := range result.Variables {
+			/*將octetString 編碼成 hexadecimal encoding ，共有 32*8個數字
+			e.g.
+			60 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+			6 in hex to binary is 0110 第一個數字為 0~3 第二個字為 4~7 以此類推
+			故 0110 則為 vlan2 vlan3 為接通著，第28位為1->0001 故 4*27+3=111，
+			故還有 vlan111
+			*/
+			hex_value := hex.EncodeToString(v.Value.([]uint8))
+			for i := 0; i < 32*8; i++ {
+				if string(hex_value[i]) == "0" {
+					continue
+				}
+				s, err := HexToBin(string(hex_value[i]))
+				if err != nil {
+					fmt.Printf("HexToBin Error:%v\n", err)
+					os.Exit(1)
+				}
+				for j := 0; j < 4; j++ {
+					if string(s[j]) == "1" {
+						port_table[port_nu] = fmt.Sprintf(port_table[port_nu]+" vlan%d ", i*4+j)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 /*轉換 ifindex to port number(Cisco & Juniper 通用)*/
@@ -103,12 +196,16 @@ func ifDescr(ifindex string) int {
 			return port_nu
 		} else {
 			/*Cisco*/
+			if !strings.Contains(s[0], "GigabitEthernet") {
+				return -1
+			}
 			port_nu, err := strconv.Atoi(s[len(s)-1])
 			if err != nil {
 				fmt.Printf("String to int error:%v\n", err)
 				os.Exit(1)
 			}
 			return port_nu
+
 		}
 	}
 	return -1
@@ -153,12 +250,12 @@ func vlan_set_table(pdu gosnmp.SnmpPDU) error {
 	oid := strings.Split(pdu.Name, ".") //分割OID
 	port_nu := ifDescr(oid[len(oid)-1])
 	if switch_name == "Cisco" {
-		port_table[port_nu] = port_table[port_nu] + " vlan" + gosnmp.ToBigInt(pdu.Value).String()
+		port_table[port_nu] = port_table[port_nu] + "\tvlan" + gosnmp.ToBigInt(pdu.Value).String()
 	} else {
 		ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
 		port_nu = ifDescr(ifindex)
 		vlan_name := jnxExVlanName(oid[len(oid)-2])
-		port_table[port_nu] = port_table[port_nu] + " " + vlan_name
+		port_table[port_nu] = port_table[port_nu] + "\t" + vlan_name
 	}
 	return nil
 }
@@ -173,7 +270,7 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 	1.3.6.1.2.1.2.2.1.2 ifDescr
 	*/
 	if switch_name == "Cisco" {
-		port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
+		port_table[i] = port_table[i] + "\t" + string(pdu.Value.([]byte))
 	} else {
 		/*Juniper
 		查閱 Juniper ifindex
@@ -181,10 +278,10 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 		i = ifDescr(oid[13]) //第14碼為 Juniper ifindex
 		/*要是處理lldpRemSysName(OID 第11碼為8)，將domain_name去掉*/
 		if oid[10] == "8" {
-			port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
+			port_table[i] = port_table[i] + "\t" + string(pdu.Value.([]byte))
 		} else {
 			s := strings.Split(string(pdu.Value.([]byte)), ".")
-			port_table[i] = port_table[i] + " " + s[0]
+			port_table[i] = port_table[i] + "\t" + s[0]
 		}
 	}
 	return nil
@@ -233,14 +330,23 @@ func portCount(pdu gosnmp.SnmpPDU) error {
 func printTable() {
 	var i int
 	if switch_name == "Cisco" {
-		for i = 1; i <= port_no/2; i++ {
-			fmt.Printf("%2d:%30s\t%2d:%30s\n", i, port_table[i], i+port_no/2, port_table[i+port_no/2])
+		for i = 1; i <= port_no; i++ {
+			fmt.Printf("%d:%s\n", i, port_table[i])
 		}
 	} else {
-		for i = 0; i < port_no/2; i++ {
-			fmt.Printf("%2d:%35s\t%2d:%35s\n", i, port_table[i], i+port_no/2, port_table[i+port_no/2])
+		for i = 0; i < port_no-1; i++ {
+			fmt.Printf("%d:%s\n", i, port_table[i])
 
 		}
 
 	}
+}
+func HexToBin(hex string) (string, error) {
+	ui, err := strconv.ParseUint(hex, 16, 64)
+	if err != nil {
+		return "", err
+	}
+
+	// %04b indicates base 2, zero padded, with 4 characters
+	return fmt.Sprintf("%04b", ui), nil
 }
