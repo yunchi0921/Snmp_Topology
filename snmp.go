@@ -14,15 +14,20 @@ import (
 /*switch_name 為設備名稱，為了區別為cisco 或是 juniper 的機器，因為其OID在輸出上會有些微不同，
 所以要區分開來。port_table，則紀錄著每個 port 現在的連線狀況。*/
 var (
-	port_no     int
-	switch_name string
-	port_table  map[int]string
+	port_no           int
+	switch_name       string
+	port_table        map[int]string
+	mode_table        map[int]string
+	vlan_table        map[int]string
+	native_vlan_table map[int]string
 )
 
 func main() {
-	Ip := []string{"192.168.1.1", "192.168.1.3"}
+	Ip := []string{"192.168.2.1", "192.168.2.3"}
 	port_table = make(map[int]string)
-
+	mode_table = make(map[int]string)
+	vlan_table = make(map[int]string)
+	native_vlan_table = make(map[int]string)
 	/*一次進行一個機器*/
 	for i := 0; i < len(Ip); i++ {
 		/*連線*/
@@ -59,48 +64,61 @@ func main() {
 				}
 			}
 		}
+		/*Native Vlan ID
+		Cisco:	1.3.6.1.4.1.9.9.46.1.6.1.1.5 vlanTrunkPortNativeVlan
+		Juniper:1.3.6.1.2.1.17.7.1.4.5.1.1	dot1qPvid
+		*/
+		oids = []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.5", "1.3.6.1.2.1.17.7.1.4.5.1.1"}
+		switch switch_name {
+		case "Cisco":
+			err = gosnmp.Default.Walk(oids[0], vlanTrunkPortNativeVlan)
+			if err != nil {
+				fmt.Printf("nativeID walk Error:%v\n", err)
+				os.Exit(1)
+			}
+		case "Juniper":
+			err = gosnmp.Default.Walk(oids[1], dot1qPvid)
+			if err != nil {
+				fmt.Printf("nativeID walk Error:%v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		/*vlan access or trunk
 		Cisco:1.3.6.1.4.1.9.9.46.1.6.1.1.14 		TrunkPortDynamicStatus
 		Juniper:1.3.6.1.4.1.2636.3.40.1.5.1.7.1.5.3 jnxExVlanPortAccessMode*/
 
-		/*Cisco trunk 通過的 vlan，因為 Cisco 設定為 trunk mode 之後，就不會再任一個 vlan 當中出現，與 Juniper trunk 同時出現在很多個 vlan 不同
-		故要額外實作一個找出其通過vlan的方法*/
+		/*Cisco trunk 通過的 vlan，因為 Cisco 設定為 trunk mode 之後，就不會再任一個 vlan 當中出現，與 Juniper 	trunk 同時出現在很多個 vlan 不同故要額外實作一個找出其通過vlan的方法*/
 
 		oids = []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.14", "1.3.6.1.4.1.2636.3.40.1.5.1.7.1.5.3"}
 		if switch_name == "Cisco" {
-			err = gosnmp.Default.Walk(oids[0], access_mode)
+			err = gosnmp.Default.Walk(oids[0], TrunkPortDynamicStatus)
 			if err != nil {
 				fmt.Printf("access_mode Walk Error:%v\n", err)
 				os.Exit(1)
 			}
 		} else {
-			err = gosnmp.Default.Walk(oids[1], access_mode)
+			err = gosnmp.Default.Walk(oids[1], jnxExVlanPortAccessMode)
 			if err != nil {
 				fmt.Printf("access_mode Walk Error:%v\n", err)
 				os.Exit(1)
 			}
 
 		}
-
-		/*Native Vlan ID
-		Cisco:	1.3.6.1.4.1.9.9.46.1.6.1.1.5 vlanTrunkPortNativeVlan
-		Juniper:1.3.6.1.2.1.17.7.1.4.5.1.1	dot1qPvid
-		*/
-		//code
-
 		/*port vlan 查詢，因為 Cisco & Juniper OID 不同，對於 Port 使用的 index 方法也不同，
-		必須分開時做，用前面儲存的 switch_name 進行判別式，區分出兩種機器實作
-		1.3.6.1.4.1.9.9.68.1.2.2.1.2		CISCO-VLAN-MEMBERSHIP-MIB
+		必須分開時做，用前面儲存的 switch_name 進行判別式，區分出兩種機器實作，同時若 mode
+		為 trunk，cisco 則會在 TrunkPortDynamicStatus 做完
+		1.3.6.1.4.1.9.9.68.1.2.2.1.2		vmVlan
 		1.3.6.1.4.1.2636.3.40.1.5.1.7.1.3	jnxExVlanPortStatus*/
 		oids = []string{"1.3.6.1.4.1.9.9.68.1.2.2.1.2", "1.3.6.1.4.1.2636.3.40.1.5.1.7.1.3"}
 		if switch_name == "Cisco" {
-			err = gosnmp.Default.Walk(oids[0], vlan_set_table)
+			err = gosnmp.Default.Walk(oids[0], vmVlan)
 			if err != nil {
 				fmt.Printf("vlan_set_table Walk Error:%v\n", err)
 				os.Exit(1)
 			}
 		} else {
-			err = gosnmp.Default.Walk(oids[1], vlan_set_table)
+			err = gosnmp.Default.Walk(oids[1], jnxExVlanPortStatus)
 			if err != nil {
 				fmt.Printf("vlan_set_table Walk Error:%v\n", err)
 				os.Exit(1)
@@ -111,63 +129,89 @@ func main() {
 
 	}
 }
-func access_mode(pdu gosnmp.SnmpPDU) error {
+func dot1qPvid(pdu gosnmp.SnmpPDU) error {
+	vlan_name := jnxExVlanName(gosnmp.ToBigInt(pdu.Value).String())
+	if vlan_name == "vlan1" {
+		return nil
+	}
 	oid := strings.Split(pdu.Name, ".")
-	switch switch_name {
-	case "Juniper":
-		ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
-		port_nu := ifDescr(ifindex)
-		mode := gosnmp.ToBigInt(pdu.Value).String()
-		if mode == "1" {
-			port_table[port_nu] = port_table[port_nu] + "\taccess"
-		} else {
-			port_table[port_nu] = port_table[port_nu] + "\ttrunk"
-		}
-	case "Cisco":
-		port_nu := ifDescr(oid[len(oid)-1])
-		mode := gosnmp.ToBigInt(pdu.Value).String()
-		if mode == "2" {
-			port_table[port_nu] = port_table[port_nu] + "\taccess"
-			return nil
-		}
-		port_table[port_nu] = port_table[port_nu] + "\ttrunk"
-		//查詢 trunk 相關 vlan
-		oids := []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.4." + oid[len(oid)-1]}
-		result, err := gosnmp.Default.Get(oids)
-		if err != nil {
-			fmt.Printf("Get TrunkPortDynamicStatus Error:%v\n", err)
-			os.Exit(1)
-		}
-		for _, v := range result.Variables {
-			/*將octetString 編碼成 hexadecimal encoding ，共有 32*8個數字
-			e.g.
-			60 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+	ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
+	port_nu := ifDescr(ifindex)
+	native_vlan_table[port_nu] = vlan_name
+	return nil
+}
+func vlanTrunkPortNativeVlan(pdu gosnmp.SnmpPDU) error {
+	value := gosnmp.ToBigInt(pdu.Value).String()
+	if value == "1" {
+		return nil
+	}
+	oid := strings.Split(pdu.Name, ".")
+	port_nu := ifDescr(oid[len(oid)-1])
+	native_vlan_table[port_nu] = "vlan" + value
+	return nil
+}
+func jnxExVlanPortAccessMode(pdu gosnmp.SnmpPDU) error {
+	oid := strings.Split(pdu.Name, ".")
+	ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
+	port_nu := ifDescr(ifindex)
+	mode := gosnmp.ToBigInt(pdu.Value).String()
+	if mode == "1" {
+		mode_table[port_nu] = "access"
+	} else {
+		mode_table[port_nu] = "trunk"
+	}
+	return nil
+}
+func TrunkPortDynamicStatus(pdu gosnmp.SnmpPDU) error {
+	oid := strings.Split(pdu.Name, ".")
+	port_nu := ifDescr(oid[len(oid)-1])
+	mode := gosnmp.ToBigInt(pdu.Value).String()
+	if mode == "2" {
+		mode_table[port_nu] = "access"
+		return nil
+	}
+	mode_table[port_nu] = "trunk"
 
-			6 in hex to binary is 0110 第一個數字為 0~3 第二個字為 4~7 以此類推
-			故 0110 則為 vlan2 vlan3 為接通著，第28位為1->0001 故 4*27+3=111，
-			故還有 vlan111
-			*/
-			hex_value := hex.EncodeToString(v.Value.([]uint8))
-			for i := 0; i < 32*8; i++ {
-				if string(hex_value[i]) == "0" {
-					continue
-				}
-				s, err := HexToBin(string(hex_value[i]))
-				if err != nil {
-					fmt.Printf("HexToBin Error:%v\n", err)
-					os.Exit(1)
-				}
-				for j := 0; j < 4; j++ {
-					if string(s[j]) == "1" {
-						port_table[port_nu] = fmt.Sprintf(port_table[port_nu]+" vlan%d ", i*4+j)
+	//查詢 trunk 相關 vlan
+	oids := []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.4." + oid[len(oid)-1]}
+	result, err := gosnmp.Default.Get(oids)
+	if err != nil {
+		fmt.Printf("Get TrunkPortDynamicStatus Error:%v\n", err)
+		os.Exit(1)
+	}
+	for _, v := range result.Variables {
+		/*將octetString 編碼成 hexadecimal encoding ，共有 32*8個數字
+		e.g.
+		60 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+		00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+		6 in hex to binary is 0110 第一個數字為 0~3 第二個字為 4~7 以此類推
+		故 0110 則為 vlan2 vlan3 為接通著，第28位為1->0001 故 4*27+3=111，
+		故還有 vlan111
+		*/
+		hex_value := hex.EncodeToString(v.Value.([]uint8))
+		for i := 0; i < 32*8; i++ {
+			if string(hex_value[i]) == "0" {
+				continue
+			}
+			s, err := HexToBin(string(hex_value[i]))
+			if err != nil {
+				fmt.Printf("HexToBin Error:%v\n", err)
+				os.Exit(1)
+			}
+			for j := 0; j < 4; j++ {
+				if string(s[j]) == "1" {
+					vlan_name := fmt.Sprintf("vlan%d", i*4+j)
+					if strings.EqualFold(native_vlan_table[port_nu], vlan_name) {
+						continue
 					}
+					vlan_table[port_nu] = fmt.Sprintf(vlan_table[port_nu]+" vlan%d", i*4+j)
 				}
 			}
 		}
@@ -244,19 +288,24 @@ func jnxExVlanName(index string) string {
 	}
 	return vlan_name
 }
+func jnxExVlanPortStatus(pdu gosnmp.SnmpPDU) error {
+	oid := strings.Split(pdu.Name, ".")
+	port_nu := ifDescr(oid[len(oid)-1])
+	ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
+	port_nu = ifDescr(ifindex)
+	vlan_name := jnxExVlanName(oid[len(oid)-2])
+	if strings.EqualFold(native_vlan_table[port_nu], vlan_name) {
+		return nil
+	}
+	vlan_table[port_nu] = vlan_table[port_nu] + " " + vlan_name
+	return nil
+}
 
 /*Port 屬於哪一個 vlan，實作因 OID 不同，又分為 Juniper 與 Cisco*/
-func vlan_set_table(pdu gosnmp.SnmpPDU) error {
+func vmVlan(pdu gosnmp.SnmpPDU) error {
 	oid := strings.Split(pdu.Name, ".") //分割OID
 	port_nu := ifDescr(oid[len(oid)-1])
-	if switch_name == "Cisco" {
-		port_table[port_nu] = port_table[port_nu] + "\tvlan" + gosnmp.ToBigInt(pdu.Value).String()
-	} else {
-		ifindex := dot1dBasePortIfIndex(oid[len(oid)-1])
-		port_nu = ifDescr(ifindex)
-		vlan_name := jnxExVlanName(oid[len(oid)-2])
-		port_table[port_nu] = port_table[port_nu] + "\t" + vlan_name
-	}
+	vlan_table[port_nu] = "vlan" + gosnmp.ToBigInt(pdu.Value).String()
 	return nil
 }
 func set_port_table(pdu gosnmp.SnmpPDU) error {
@@ -270,7 +319,7 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 	1.3.6.1.2.1.2.2.1.2 ifDescr
 	*/
 	if switch_name == "Cisco" {
-		port_table[i] = port_table[i] + "\t" + string(pdu.Value.([]byte))
+		port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
 	} else {
 		/*Juniper
 		查閱 Juniper ifindex
@@ -281,7 +330,7 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 			port_table[i] = port_table[i] + "\t" + string(pdu.Value.([]byte))
 		} else {
 			s := strings.Split(string(pdu.Value.([]byte)), ".")
-			port_table[i] = port_table[i] + "\t" + s[0]
+			port_table[i] = port_table[i] + " " + s[0]
 		}
 	}
 	return nil
@@ -311,7 +360,10 @@ func intialize_map() {
 		os.Exit(1)
 	}
 	for i := 0; i < 48; i++ {
-		port_table[i] = ""
+		port_table[i] = " "
+		mode_table[i] = " "
+		vlan_table[i] = " "
+		native_vlan_table[i] = " "
 	}
 }
 
@@ -328,14 +380,18 @@ func portCount(pdu gosnmp.SnmpPDU) error {
 	return nil
 }
 func printTable() {
+	fmt.Println("============================================================================================================")
+	fmt.Printf("%s%30s%21s%18s%30s\n", "Interface", "RemotePort&Hostname", "PortMode", "NativeVLAN", "VLAN")
+	fmt.Println("------------------------------------------------------------------------------------------------------------")
 	var i int
+
 	if switch_name == "Cisco" {
 		for i = 1; i <= port_no; i++ {
-			fmt.Printf("%d:%s\n", i, port_table[i])
+			fmt.Printf("%2d:%36s%21s%18s%30s\n", i, port_table[i], mode_table[i], native_vlan_table[i], vlan_table[i])
 		}
 	} else {
 		for i = 0; i < port_no-1; i++ {
-			fmt.Printf("%d:%s\n", i, port_table[i])
+			fmt.Printf("%2d:%36s%21s%18s%30s\n", i, port_table[i], mode_table[i], native_vlan_table[i], vlan_table[i])
 
 		}
 
