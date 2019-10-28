@@ -1,8 +1,8 @@
-#Switch Topology
+# Switch Topology
 
 Switch topology is a program in GO. It gives u information of all of switch connected each other.It provides Hostname, Remote Port Index, PortMode ,VLAN and Native VLan. It is implemented by [soniah/gosnmp](https://github.com/soniah/gosnmp)
 
-##Usage
+## Usage
 
 Here is `snmp.go` . You should change your IP in the IP array in the beginning of main function.
 e.g.
